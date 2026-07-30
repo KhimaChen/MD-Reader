@@ -4,9 +4,10 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import MarkdownView from './MarkdownView.jsx'
 import { extractHeadings } from './slug.js'
-import { applyFileChange, FILE_CHANGE_KIND } from './fileChanges.js'
+import { applyFileChange, changeCarriesContent } from './fileChanges.js'
+import markdownExtensions from '../markdown-extensions.json'
 
-const MD_EXTENSIONS = /\.(md|markdown|mdown|mkd|mkdn|mdtxt|text|txt)$/i
+const MD_EXTENSIONS = new RegExp(`\\.(${markdownExtensions.join('|')})$`, 'i')
 
 let idSeq = 0
 const nextId = () => `f${++idSeq}`
@@ -118,9 +119,11 @@ export default function App() {
     let cancelled = false
     listen('file-change', (event) => {
       const change = event.payload
-      const reloadsContent =
-        change.kind === FILE_CHANGE_KIND.RELOAD || change.kind === FILE_CHANGE_KIND.REATTACHED
-      if (reloadsContent && change.path === activePathRef.current && contentRef.current) {
+      if (
+        changeCarriesContent(change.kind) &&
+        change.path === activePathRef.current &&
+        contentRef.current
+      ) {
         const el = contentRef.current
         pendingScrollRatio.current =
           el.scrollHeight > 0 ? el.scrollTop / el.scrollHeight : null

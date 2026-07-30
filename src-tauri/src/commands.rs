@@ -3,7 +3,12 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tauri_plugin_dialog::DialogExt;
 
-const EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdtxt", "text", "txt"];
+// Shared with the frontend's markdown-extension check (see src/App.jsx) so
+// the recognized-extension list has one source of truth.
+fn markdown_extensions() -> Vec<String> {
+    const RAW: &str = include_str!("../../markdown-extensions.json");
+    serde_json::from_str(RAW).expect("markdown-extensions.json must be a JSON array of strings")
+}
 
 #[derive(Serialize, Clone)]
 pub struct OpenedFile {
@@ -32,10 +37,12 @@ pub fn open_markdown_dialog(
     app: tauri::AppHandle,
     manager: tauri::State<WatchManager>,
 ) -> Result<Vec<OpenedFile>, String> {
+    let extensions = markdown_extensions();
+    let extension_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
     let picked = app
         .dialog()
         .file()
-        .add_filter("Markdown", EXTENSIONS)
+        .add_filter("Markdown", &extension_refs)
         .blocking_pick_files();
 
     let Some(picked) = picked else {
