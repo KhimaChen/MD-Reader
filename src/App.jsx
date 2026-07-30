@@ -1,22 +1,36 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import MarkdownView from './MarkdownView.jsx'
 import { extractHeadings } from './slug.js'
+import { applyFileChange, FILE_CHANGE_KIND } from './fileChanges.js'
 
 const MD_EXTENSIONS = /\.(md|markdown|mdown|mkd|mkdn|mdtxt|text|txt)$/i
 
 let idSeq = 0
 const nextId = () => `f${++idSeq}`
 
+function toTab(opened) {
+  return {
+    id: nextId(),
+    path: opened.path,
+    name: opened.name,
+    content: opened.content,
+    detached: false,
+  }
+}
+
 export default function App() {
-  const [files, setFiles] = useState([]) // { id, name, content }
+  const [files, setFiles] = useState([]) // { id, path, name, content, detached }
   const [activeId, setActiveId] = useState(null)
   const [theme, setTheme] = useState(
     () => localStorage.getItem('md-reader-theme') || 'light'
   )
   const [dragging, setDragging] = useState(false)
-  const fileInputRef = useRef(null)
   const contentRef = useRef(null)
-  const dragDepth = useRef(0)
+  const activePathRef = useRef(null)
+  const pendingScrollRatio = useRef(null)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -25,40 +39,47 @@ export default function App() {
 
   const active = files.find((f) => f.id === activeId) || null
 
+  useEffect(() => {
+    activePathRef.current = active?.path ?? null
+  }, [active?.path])
+
   const headings = useMemo(
     () => (active ? extractHeadings(active.content) : []),
     [active]
   )
 
-  const addFiles = useCallback((fileList) => {
-    const mdFiles = Array.from(fileList).filter((f) =>
-      MD_EXTENSIONS.test(f.name)
-    )
-    if (mdFiles.length === 0) return
-
-    mdFiles.forEach((file) => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        const id = nextId()
-        setFiles((prev) => [
-          ...prev,
-          { id, name: file.name, content: String(reader.result) },
-        ])
-        setActiveId(id)
-      }
-      reader.readAsText(file)
-    })
+  const addOpenedFiles = useCallback((openedFiles) => {
+    if (!openedFiles || openedFiles.length === 0) return
+    const tabs = openedFiles.map(toTab)
+    setFiles((prev) => [...prev, ...tabs])
+    setActiveId(tabs[tabs.length - 1].id)
   }, [])
 
-  const onInputChange = (e) => {
-    addFiles(e.target.files)
-    e.target.value = '' // allow re-opening the same file
-  }
+  const openDialog = useCallback(async () => {
+    const opened = await invoke('open_markdown_dialog')
+    addOpenedFiles(opened)
+  }, [addOpenedFiles])
+
+  const openPaths = useCallback(
+    async (paths) => {
+      const mdPaths = paths.filter((p) => MD_EXTENSIONS.test(p))
+      if (mdPaths.length === 0) return
+      const opened = await Promise.all(
+        mdPaths.map((path) => invoke('open_path', { path }))
+      )
+      addOpenedFiles(opened)
+    },
+    [addOpenedFiles]
+  )
 
   const closeFile = (id, e) => {
     e.stopPropagation()
     setFiles((prev) => {
+      const closed = prev.find((f) => f.id === id)
       const next = prev.filter((f) => f.id !== id)
+      if (closed && !next.some((f) => f.path === closed.path)) {
+        invoke('close_path', { path: closed.path })
+      }
       if (id === activeId) {
         setActiveId(next.length ? next[next.length - 1].id : null)
       }
@@ -66,29 +87,65 @@ export default function App() {
     })
   }
 
-  // Drag & drop
-  const onDragEnter = (e) => {
-    e.preventDefault()
-    dragDepth.current += 1
-    setDragging(true)
-  }
-  const onDragOver = (e) => e.preventDefault()
-  const onDragLeave = (e) => {
-    e.preventDefault()
-    dragDepth.current -= 1
-    if (dragDepth.current <= 0) {
-      dragDepth.current = 0
-      setDragging(false)
+  // Native drag-and-drop, so dropped files carry real filesystem paths (ADR 0001).
+  useEffect(() => {
+    let unlisten
+    let cancelled = false
+    getCurrentWindow()
+      .onDragDropEvent((event) => {
+        const { type } = event.payload
+        if (type === 'enter' || type === 'over') setDragging(true)
+        else if (type === 'leave') setDragging(false)
+        else if (type === 'drop') {
+          setDragging(false)
+          openPaths(event.payload.paths)
+        }
+      })
+      .then((fn) => {
+        if (cancelled) fn()
+        else unlisten = fn
+      })
+    return () => {
+      cancelled = true
+      unlisten?.()
     }
-  }
-  const onDrop = (e) => {
-    e.preventDefault()
-    dragDepth.current = 0
-    setDragging(false)
-    if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files)
-  }
+  }, [openPaths])
 
-  // Scroll content to top when switching files.
+  // Live Reload: apply semantic events from the Rust watcher (see
+  // src-tauri/src/watch/mod.rs and CONTEXT.md for Live Reload / Detached).
+  useEffect(() => {
+    let unlisten
+    let cancelled = false
+    listen('file-change', (event) => {
+      const change = event.payload
+      const reloadsContent =
+        change.kind === FILE_CHANGE_KIND.RELOAD || change.kind === FILE_CHANGE_KIND.REATTACHED
+      if (reloadsContent && change.path === activePathRef.current && contentRef.current) {
+        const el = contentRef.current
+        pendingScrollRatio.current =
+          el.scrollHeight > 0 ? el.scrollTop / el.scrollHeight : null
+      }
+      setFiles((prev) => applyFileChange(prev, change))
+    }).then((fn) => {
+      if (cancelled) fn()
+      else unlisten = fn
+    })
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [])
+
+  // Restore scroll position (as a ratio) after a Live Reload of the active tab.
+  useLayoutEffect(() => {
+    if (pendingScrollRatio.current == null) return
+    const el = contentRef.current
+    if (el) el.scrollTop = pendingScrollRatio.current * el.scrollHeight
+    pendingScrollRatio.current = null
+  }, [active?.content])
+
+  // Scroll content to top when switching files. A Live Reload of the active
+  // tab doesn't change activeId, so it's unaffected by this effect.
   useEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = 0
   }, [activeId])
@@ -100,23 +157,14 @@ export default function App() {
   }
 
   return (
-    <div
-      className="app"
-      onDragEnter={onDragEnter}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-    >
+    <div className="app">
       <header className="toolbar">
         <div className="brand">
           <Logo />
           <span>MD Reader</span>
         </div>
         <div className="toolbar-spacer" />
-        <button
-          className="btn btn-primary"
-          onClick={() => fileInputRef.current?.click()}
-        >
+        <button className="btn btn-primary" onClick={openDialog}>
           <FolderIcon />
           Open file
         </button>
@@ -127,14 +175,6 @@ export default function App() {
         >
           {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".md,.markdown,.mdown,.mkd,.mkdn,.mdtxt,.text,.txt,text/markdown,text/plain"
-          multiple
-          hidden
-          onChange={onInputChange}
-        />
       </header>
 
       <div className="body">
@@ -150,6 +190,14 @@ export default function App() {
               >
                 <FileIcon />
                 <span className="name">{f.name}</span>
+                {f.detached && (
+                  <span
+                    className="detached-marker"
+                    title="File no longer found on disk"
+                  >
+                    <DetachedIcon />
+                  </span>
+                )}
                 <span
                   className="close"
                   role="button"
@@ -177,10 +225,7 @@ export default function App() {
                 only — your files are never modified.
               </p>
               <div style={{ display: 'flex', gap: 12 }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => fileInputRef.current?.click()}
-                >
+                <button className="btn btn-primary" onClick={openDialog}>
                   <FolderIcon />
                   Open file
                 </button>
@@ -251,6 +296,14 @@ function FileIcon() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M6 2h8l4 4v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" />
       <path d="M14 2v4h4" />
+    </svg>
+  )
+}
+function DetachedIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 9v4M12 17h.01" />
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
     </svg>
   )
 }

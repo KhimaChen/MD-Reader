@@ -1,0 +1,3 @@
+# Use Tauri-native dialog/fs/drag-drop APIs instead of the browser File API
+
+MD-Reader currently opens files purely through the browser `FileReader` API (both the "Open file" dialog and drag-and-drop), which never exposes a real filesystem path — only an in-memory blob. To support Live Reload, every open tab needs a real path a watcher can attach to. We're switching file opening to Tauri's native dialog and fs plugins, and reverting drag-and-drop to Tauri's native `onDragDropEvent` (which the previous commit had deliberately turned off in favor of webview HTML5 DnD, to fix drops not working at all). Native drag-drop will need to be reimplemented properly this time so it keeps working while also yielding real paths.

@@ -236,6 +236,12 @@ body {
   flex-shrink: 0;
 }
 
+.file-item .detached-marker {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--warning, #d97706);
+}
+
 /* ---------- Content ---------- */
 .content {
   flex: 1;

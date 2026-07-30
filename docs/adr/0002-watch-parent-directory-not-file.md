@@ -1,0 +1,3 @@
+# Watch each open file's parent directory, not the file path directly
+
+For Live Reload, the `notify`-based watcher targets each open file's parent directory and filters events by filename, rather than watching the file path itself. Many editors (VS Code, Vim, etc.) save "atomically" — write a temp file, then rename it over the original — which on some platforms breaks a direct file watch once the original inode is replaced. Watching the containing directory survives this pattern, and as a side effect also lets a Detached tab (file deleted or moved away) automatically reattach if a file reappears at the same path, since the directory watch was never tied to the old file handle.
